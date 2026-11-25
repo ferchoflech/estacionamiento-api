@@ -1,13 +1,14 @@
 from datetime import datetime
 import math
+import os
 import sqlite3
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Estacionamiento Zoológico de León API", version="1.1")
+app = FastAPI(title="Estacionamiento Zoológico de León API", version="1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,6 +21,7 @@ app.add_middleware(
 DB_NAME = "estacionamiento_zoologico.db"
 CAPACIDAD_MAXIMA = 50
 TARIFA_EXTRAVIADO = 250.0  # Tarifa fija por boleto extraviado / perdido
+ADMIN_PASSWORD = os.getenv("ZOO_ADMIN_PASSWORD", "ZOOADMIN2026")
 
 TARIFAS_VEHICULO = {
     "MOTO": 12.0,
@@ -31,6 +33,10 @@ TARIFAS_VEHICULO = {
 class EntradaRequest(BaseModel):
     tipo_vehiculo: str = "AUTOMOVIL"
     placas: str = "SIN-PLACA"
+
+
+class ExtraviadoRequest(BaseModel):
+    password: str
 
 
 def get_conexion():
@@ -55,7 +61,6 @@ def inicializar_base_datos():
         )
     """)
 
-    # Migración segura por si la tabla ya existía sin estas columnas
     cursor.execute("PRAGMA table_info(tickets)")
     columnas = {row["name"] for row in cursor.fetchall()}
     if "tipo_vehiculo" not in columnas:
@@ -70,6 +75,15 @@ def inicializar_base_datos():
 
 
 inicializar_base_datos()
+
+
+def verificar_admin(password_body: Optional[str], password_header: Optional[str]):
+    credencial = (password_body or password_header or "").strip()
+    if not credencial or credencial != ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=401,
+            detail="Acceso denegado: contraseña de administrador incorrecta."
+        )
 
 
 @app.post("/api/entrada")
@@ -159,7 +173,6 @@ def pagar_ticket(folio: int):
     segundos = max(0.0, (ahora - entrada_dt).total_seconds())
     horas_cobradas = max(1, math.ceil(segundos / 3600.0))
 
-    # Tarifa base según tipo de vehículo (se cobra al menos 1 bloque)
     tarifa_unitaria = row["tarifa_base"] if row["tarifa_base"] else TARIFAS_VEHICULO.get(row["tipo_vehiculo"], 31.0)
     total_a_pagar = round(float(tarifa_unitaria), 2)
 
@@ -186,7 +199,13 @@ def pagar_ticket(folio: int):
 
 
 @app.put("/api/boleto-extraviado/{folio}")
-def boleto_extraviado(folio: int):
+def boleto_extraviado(
+    folio: int,
+    payload: Optional[ExtraviadoRequest] = None,
+    x_admin_password: Optional[str] = Header(default=None),
+):
+    verificar_admin(payload.password if payload else None, x_admin_password)
+
     conn = get_conexion()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM tickets WHERE folio = ?", (folio,))
